@@ -1,0 +1,2 @@
+- Switch from react-router-dom to maybe tanstack or remix
+- Write the C func to request accessiblity API on mac
