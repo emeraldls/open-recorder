@@ -4,10 +4,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"image"
 	"io"
 	"log"
 	"os"
 	"os/exec"
+	"regexp"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -18,14 +22,74 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
+// Resolution constants
+const (
+	Resolution720p  = "1280x720"
+	Resolution1080p = "1920x1080"
+	Resolution1440p = "2560x1440"
+	Resolution4K    = "3840x2160"
+)
+
+/*
+	I need to build a custom mouse graphic,
+
+	i know the mouse movements as it changes
+*/
+
+type Mouse struct {
+	x   int
+	y   int
+	img image.RGBA
+}
+
+func (m *Mouse) Draw() {
+
+}
+
 type ZoomPoint struct {
 	X         int
 	Y         int
 	Timestamp time.Time
 }
 
+type CaptureDevice struct {
+	Index int    `json:"index"`
+	Name  string `json:"name"`
+}
+
+type ResolutionDimensions struct {
+	Width  int
+	Height int
+}
+
+// parseResolution converts a resolution string like "1920x1080" to width and height
+func parseResolution(resolution string) (ResolutionDimensions, error) {
+	parts := strings.Split(resolution, "x")
+	if len(parts) != 2 {
+		return ResolutionDimensions{}, fmt.Errorf("invalid resolution format: %s", resolution)
+	}
+
+	width, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return ResolutionDimensions{}, fmt.Errorf("invalid width in resolution: %s", parts[0])
+	}
+
+	height, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return ResolutionDimensions{}, fmt.Errorf("invalid height in resolution: %s", parts[1])
+	}
+
+	return ResolutionDimensions{Width: width, Height: height}, nil
+}
+
+// GetResolutionDimensions returns the width and height for the app's current resolution
+func (a *App) GetResolutionDimensions() (ResolutionDimensions, error) {
+	return parseResolution(a.resolution)
+}
+
 type App struct {
 	ctx           context.Context
+	resolution    string
 	isRecording   bool
 	stopRecording chan bool
 	recordingMux  sync.Mutex
@@ -46,6 +110,8 @@ type App struct {
 	zoomPoints         []ZoomPoint
 	zoomPointsMux      sync.Mutex
 	recordingStartTime time.Time
+	selectedDevice     int
+	deviceMux          sync.Mutex
 }
 
 func NewApp() *App {
@@ -54,6 +120,7 @@ func NewApp() *App {
 			x int
 			y int
 		}, 10),
+		resolution: Resolution1080p,
 	}
 }
 
@@ -164,6 +231,8 @@ func (a *App) StartRecording() error {
 		return fmt.Errorf("recording is already in progress")
 	}
 
+	runtime.EventsEmit(a.ctx, "recording_preparing")
+
 	a.isRecording = true
 	a.stopRecording = make(chan bool)
 	a.recordingStartTime = time.Now()
@@ -172,9 +241,12 @@ func (a *App) StartRecording() error {
 	a.zoomPoints = []ZoomPoint{}
 	a.zoomPointsMux.Unlock()
 
-	runtime.EventsEmit(a.ctx, "recording_started")
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		runtime.EventsEmit(a.ctx, "recording_started")
+		a.recordScreen()
+	}()
 
-	go a.recordScreen()
 	a.startMouseCapture()
 	return nil
 }
@@ -201,6 +273,88 @@ func (a *App) IsRecording() bool {
 	return a.isRecording
 }
 
+func (a *App) SetResolution(resolution string) error {
+	_, err := parseResolution(resolution)
+	if err != nil {
+		return fmt.Errorf("invalid resolution format: %v", err)
+	}
+
+	a.recordingMux.Lock()
+	defer a.recordingMux.Unlock()
+
+	if a.isRecording {
+		return fmt.Errorf("cannot change resolution while recording")
+	}
+
+	a.resolution = resolution
+	return nil
+}
+
+func (a *App) GetResolution() string {
+	a.recordingMux.Lock()
+	defer a.recordingMux.Unlock()
+	return a.resolution
+}
+
+func (a *App) GetAvailableResolutions() []string {
+	return []string{
+		Resolution720p,
+		Resolution1080p,
+		Resolution1440p,
+		Resolution4K,
+	}
+}
+
+func (a *App) GetCaptureDevices() ([]CaptureDevice, error) {
+	cmd := exec.Command("ffmpeg", "-f", "avfoundation", "-list_devices", "true", "-i", "")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+
+	cmd.Run()
+
+	output := stderr.String()
+
+	fmt.Printf("\n\n%s\n\n", output)
+
+	var devices []CaptureDevice
+
+	re := regexp.MustCompile(`\[(\d+)\] (Capture screen \d+)`)
+	matches := re.FindAllStringSubmatch(output, -1)
+
+	for _, match := range matches {
+		if len(match) >= 3 {
+			index, err := strconv.Atoi(match[1])
+			if err != nil {
+				continue
+			}
+			devices = append(devices, CaptureDevice{
+				Index: index,
+				Name:  match[2],
+			})
+		}
+	}
+
+	return devices, nil
+}
+
+func (a *App) SetSelectedDevice(deviceIndex int) error {
+	a.deviceMux.Lock()
+	defer a.deviceMux.Unlock()
+
+	if a.isRecording {
+		return fmt.Errorf("cannot change device while recording")
+	}
+
+	a.selectedDevice = deviceIndex
+	return nil
+}
+
+func (a *App) GetSelectedDevice() int {
+	a.deviceMux.Lock()
+	defer a.deviceMux.Unlock()
+	return a.selectedDevice
+}
+
 /* my issues when using kibani/screenshot
 at 30fps, when I calculate diff myself, I get ~15ps
 at 60fps, same thing, I get ~12fps
@@ -218,14 +372,33 @@ func (a *App) recordScreen() {
 
 	frameRate := 60
 
+	resDim, err := a.GetResolutionDimensions()
+	if err != nil {
+		log.Printf("Error parsing resolution: %v", err)
+		resDim = ResolutionDimensions{Width: 1920, Height: 1080}
+	}
+
+	a.deviceMux.Lock()
+	selectedDevice := a.selectedDevice
+
+	a.deviceMux.Unlock()
+	fmt.Printf("The selected device is: %d\n", selectedDevice)
+
+	fmt.Printf("Width: %d, Height: %d, Device: %d\n", resDim.Width, resDim.Height, selectedDevice)
+
+	deviceInput := fmt.Sprintf("%d:none", selectedDevice)
+
+	// scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,
 	cmd := exec.Command("ffmpeg",
 		"-f", "avfoundation",
+		"-capture_cursor", "1",
 		"-framerate", fmt.Sprintf("%d", frameRate),
-		"-i", "4:none",
+		"-i", deviceInput,
 		"-c:v", "libx264",
 		"-preset", "medium",
 		"-crf", "23",
-		"-pix_fmt", "yuv420p",
+		"-pix_fmt", "uyvy422",
+		"-vf", "eq=brightness=0.019:saturation=1.15:gamma=0.8",
 		"-f", "mp4",
 		"-movflags", "frag_keyframe+empty_moov+default_base_moof",
 		"-flush_packets", "1",
@@ -279,31 +452,30 @@ func (a *App) recordScreen() {
 func (a *App) SaveFile(data []byte) error {
 
 	randId := uuid.New().String()
+	fileName := fmt.Sprintf("recording-%s.mp4", randId)
 	result, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
 		Title:           "Save MP4 Video",
 		Filters:         []runtime.FileFilter{{DisplayName: "MP4 Video", Pattern: "*.mp4"}},
-		DefaultFilename: fmt.Sprintf("recording-%s.mp4", randId),
+		DefaultFilename: fileName,
 	})
 	if err != nil || result == "" {
 		return fmt.Errorf("save cancelled or failed: %v", err)
 	}
 
-	return nil
+	a.zoomPointsMux.Lock()
+	hasZoomPoints := len(a.zoomPoints) > 0
+	zoomPoints := make([]ZoomPoint, len(a.zoomPoints))
+	copy(zoomPoints, a.zoomPoints)
+	a.zoomPointsMux.Unlock()
 
-	// a.zoomPointsMux.Lock()
-	// // hasZoomPoints := len(a.zoomPoints) > 0
-	// zoomPoints := make([]ZoomPoint, len(a.zoomPoints))
-	// copy(zoomPoints, a.zoomPoints)
-	// a.zoomPointsMux.Unlock()
+	path := "recording-zoom.mp4"
 
-	// path := "recording-zoom.mp4"
+	if hasZoomPoints {
+		fmt.Printf("Applying zoom effects to %d points\n", len(zoomPoints))
+		return a.saveFileWithZoom(data, path, zoomPoints)
+	}
 
-	// // if hasZoomPoints {
-	// // 	fmt.Printf("Applying zoom effects to %d points\n", len(zoomPoints))
-	// // 	return a.saveFileWithZoom(data, path, zoomPoints)
-	// // }
-
-	// return os.WriteFile(path, data, 0644)
+	return os.WriteFile(path, data, 0644)
 }
 
 func (a *App) buildZoomFilter(zoomPoints []ZoomPoint) string {
@@ -315,6 +487,12 @@ func (a *App) buildZoomFilter(zoomPoints []ZoomPoint) string {
 	zoomDuration := 2.0
 	zoomFactor := 2.0
 
+	resDim, err := a.GetResolutionDimensions()
+	if err != nil {
+		log.Printf("Error parsing resolution for zoom filter: %v", err)
+		resDim = ResolutionDimensions{Width: 1920, Height: 1080}
+	}
+
 	a.recordingMux.Lock()
 	recordingStartTime := a.recordingStartTime
 	a.recordingMux.Unlock()
@@ -324,16 +502,16 @@ func (a *App) buildZoomFilter(zoomPoints []ZoomPoint) string {
 	endFrame := startFrame + int(zoomDuration*fps)
 
 	zoomExpr := fmt.Sprintf(
-		"if(between(on,%d,%d), 1+(%.2f-1)*(1-abs(2*(on-%d)/%.0f-1)), 1)",
-		startFrame, endFrame, zoomFactor, startFrame+int((zoomDuration*fps)/2), zoomDuration*fps,
+		"if(between(on,%d,%d), 1+(%.2f-1)*(1-abs(2*(on-%d)/%d-1)), 1)",
+		startFrame, endFrame, zoomFactor, startFrame, endFrame-startFrame,
 	)
 
 	xExpr := fmt.Sprintf("%d-(iw/zoom/2)", point.X)
 	yExpr := fmt.Sprintf("%d-(ih/zoom/2)", point.Y)
 
 	return fmt.Sprintf(
-		"zoompan=z='%s':x='%s':y='%s':d=1:fps=%.0f",
-		zoomExpr, xExpr, yExpr, fps,
+		"zoompan=z='%s':x='%s':y='%s':d=1:fps=%.0f,scale=iw:ih:force_original_aspect_ratio=increase,crop=%d:%d",
+		zoomExpr, xExpr, yExpr, fps, resDim.Width, resDim.Height,
 	)
 }
 
