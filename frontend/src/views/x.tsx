@@ -7,12 +7,24 @@ import {
   IsRecording,
   StartRecording,
   SaveFile,
+  SaveFileWithFPS,
   GetCaptureDevices,
   GetSelectedDevice,
   SetSelectedDevice,
+  GetZoomPoints,
 } from "../../wailsjs/go/main/App";
 import { main } from "../../wailsjs/go/models";
-import { Play, Square, Download, Circle, Monitor } from "lucide-react";
+import {
+  Play,
+  Square,
+  Download,
+  Circle,
+  Monitor,
+  Pause,
+  SkipBack,
+  SkipForward,
+  Settings,
+} from "lucide-react";
 
 export const Recorder = () => {
   const [isRecording, setIsRecording] = useState<boolean>(false);
@@ -28,7 +40,83 @@ export const Recorder = () => {
     null
   );
   const [isLoadingDevices, setIsLoadingDevices] = useState<boolean>(true);
-  const videoRef = useRef<HTMLVideoElement>(null);
+
+  // Video editing states
+  const [isPlaying, setIsPlaying] = useState<boolean>(false);
+  const [currentTime, setCurrentTime] = useState<number>(0);
+  const [duration, setDuration] = useState<number>(0);
+  const [timelineScale, setTimelineScale] = useState<number>(1);
+  const [zoomPoints, setZoomPoints] = useState<main.ZoomPoint[]>([]);
+  const [selectedFPS, setSelectedFPS] = useState<number>(30);
+
+  // Refs
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const hiddenVideoRef = useRef<HTMLVideoElement>(null);
+
+  const drawVideoFrame = () => {
+    const canvas = canvasRef.current;
+    const video = hiddenVideoRef.current;
+
+    if (!canvas || !video || video.readyState < 2) return;
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+
+    if (canvas.width !== video.videoWidth) {
+      canvas.width = video.videoWidth;
+    }
+    if (canvas.height !== video.videoHeight) {
+      canvas.height = video.videoHeight;
+    }
+
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+  };
+
+  const togglePlayPause = () => {
+    const video = hiddenVideoRef.current;
+    if (!video) return;
+
+    if (isPlaying) {
+      video.pause();
+    } else {
+      video.play().catch((error) => {
+        console.error("Failed to play video:", error);
+      });
+    }
+  };
+
+  const seekToTime = (time: number) => {
+    const video = hiddenVideoRef.current;
+    if (!video) return;
+
+    const clampedTime = Math.max(0, Math.min(time, duration));
+    video.currentTime = clampedTime;
+    setCurrentTime(clampedTime);
+  };
+
+  const skipBackward = () => {
+    seekToTime(currentTime - 10);
+  };
+
+  const skipForward = () => {
+    seekToTime(currentTime + 10);
+  };
+
+  const formatTime = (seconds: number): string => {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${mins}:${secs.toString().padStart(2, "0")}`;
+  };
+
+  const loadZoomPoints = async () => {
+    try {
+      const points = await GetZoomPoints();
+      setZoomPoints(points);
+      console.log("Loaded zoom points:", points);
+    } catch (error) {
+      console.error("Failed to load zoom points:", error);
+    }
+  };
 
   const base64ToArrayBuffer = (base64: string): ArrayBuffer | null => {
     try {
@@ -122,14 +210,21 @@ export const Recorder = () => {
           setIsRecording(false);
           setIsProcessing(false);
 
-          console.log("Video ref", videoRef.current);
+          const blob = new Blob([arrayBuffer], { type: "video/mp4" });
+          const url = URL.createObjectURL(blob);
 
-          if (videoRef.current) {
-            const blob = new Blob([arrayBuffer], { type: "video/mp4" });
-            const url = URL.createObjectURL(blob);
-            console.log("url: ", url);
-            videoRef.current.src = url;
+          if (hiddenVideoRef.current) {
+            hiddenVideoRef.current.src = url;
+            hiddenVideoRef.current.onloadedmetadata = () => {
+              if (hiddenVideoRef.current) {
+                setDuration(hiddenVideoRef.current.duration);
+                // drawVideoFrame();
+                // loadZoomPoints();
+              }
+            };
           }
+
+          console.log("Video setup complete");
         }
       }, 800);
     });
@@ -228,7 +323,11 @@ export const Recorder = () => {
     try {
       const uint8Array = new Uint8Array(videoData);
       const array = Array.from(uint8Array);
-      await SaveFile(array);
+
+      // Use the new SaveFileWithFPS function with selected frame rate
+      await SaveFileWithFPS(array, selectedFPS);
+
+      console.log(`Video saved with ${selectedFPS}fps`);
     } catch (error) {
       console.error("Failed to save video:", error);
     }
@@ -342,15 +441,64 @@ export const Recorder = () => {
         >
           <CardContent className="p-0">
             <div className="relative">
-              <video
-                ref={videoRef}
-                controls
-                autoPlay
+              <canvas
+                ref={canvasRef}
                 className="w-full h-auto rounded-lg bg-black"
-                style={{ minHeight: "300px" }}
+                style={{ minHeight: "300px", maxHeight: "600px" }}
               />
 
-              <div className="absolute top-4 right-4">
+              <video
+                ref={hiddenVideoRef}
+                className="hidden"
+                // onTimeUpdate={() => {
+                //   if (
+                //     hiddenVideoRef.current &&
+                //     !hiddenVideoRef.current.seeking
+                //   ) {
+                //     setCurrentTime(hiddenVideoRef.current.currentTime);
+                //     drawVideoFrame();
+                //   }
+                // }}
+                // onSeeking={() => {
+                //   drawVideoFrame();
+                // }}
+                // onSeeked={() => {
+                //   if (hiddenVideoRef.current) {
+                //     setCurrentTime(hiddenVideoRef.current.currentTime);
+                //     drawVideoFrame();
+                //   }
+                // }}
+                // onPlay={() => {
+                //   setIsPlaying(true);
+                // }}
+                // onPause={() => {
+                //   setIsPlaying(false);
+                // }}
+                // onEnded={() => {
+                //   setIsPlaying(false);
+                // }}
+                // onLoadedData={() => {
+                //   drawVideoFrame();
+                // }}
+              />
+
+              <div className="absolute top-4 right-4 flex items-center gap-2">
+                <select
+                  value={selectedFPS}
+                  onChange={(e) => setSelectedFPS(Number(e.target.value))}
+                  className={`
+                    px-2 py-1 text-xs rounded border border-border bg-background/90
+                    text-foreground focus:outline-none focus:ring-1 focus:ring-primary/50
+                    backdrop-blur-sm
+                  `}
+                >
+                  <option value={15}>15 FPS</option>
+                  <option value={24}>24 FPS</option>
+                  <option value={30}>30 FPS</option>
+                  <option value={48}>48 FPS</option>
+                  <option value={60}>60 FPS</option>
+                </select>
+
                 <Button
                   onClick={saveVideo}
                   size="sm"
@@ -364,6 +512,92 @@ export const Recorder = () => {
                   <Download className="w-4 h-4 mr-2" />
                   Save
                 </Button>
+              </div>
+            </div>
+
+            <div className="p-4 bg-background/95 backdrop-blur-sm">
+              <div className="flex items-center gap-4 mb-4">
+                <Button
+                  onClick={togglePlayPause}
+                  size="sm"
+                  variant="outline"
+                  className="rounded-full"
+                >
+                  {isPlaying ? (
+                    <Pause className="w-4 h-4" />
+                  ) : (
+                    <Play className="w-4 h-4" />
+                  )}
+                </Button>
+
+                <Button
+                  onClick={skipBackward}
+                  size="sm"
+                  variant="outline"
+                  className="rounded-full"
+                >
+                  <SkipBack className="w-4 h-4" />
+                </Button>
+
+                <Button
+                  onClick={skipForward}
+                  size="sm"
+                  variant="outline"
+                  className="rounded-full"
+                >
+                  <SkipForward className="w-4 h-4" />
+                </Button>
+
+                <div className="text-sm text-muted-foreground">
+                  {formatTime(currentTime)} / {formatTime(duration)}
+                </div>
+              </div>
+
+              <div className="relative">
+                <div className="w-full h-2 bg-border rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-primary transition-all duration-150"
+                    style={{
+                      width: `${
+                        duration > 0 ? (currentTime / duration) * 100 : 0
+                      }%`,
+                    }}
+                  />
+                </div>
+
+                <input
+                  type="range"
+                  min={0}
+                  max={duration}
+                  value={currentTime}
+                  onChange={(e) => seekToTime(Number(e.target.value))}
+                  className={`
+                    absolute top-0 left-0 w-full h-2 opacity-0 cursor-pointer
+                  `}
+                />
+
+                <div className="absolute top-0 left-0 w-full h-2 pointer-events-none">
+                  {zoomPoints.map((point, index) => {
+                    const timestamp = new Date(point.Timestamp).getTime();
+                    const recordingStart =
+                      new Date(point.Timestamp).getTime() -
+                      (timestamp % (duration * 1000));
+                    const relativeSeconds = (timestamp - recordingStart) / 1000;
+                    const position =
+                      duration > 0 ? (relativeSeconds / duration) * 100 : 0;
+
+                    return (
+                      <div
+                        key={index}
+                        className="absolute w-1 h-4 bg-yellow-400 transform -translate-x-1/2 -translate-y-1"
+                        style={{
+                          left: `${Math.max(0, Math.min(100, position))}%`,
+                        }}
+                        title={`Zoom point at ${formatTime(relativeSeconds)}`}
+                      />
+                    );
+                  })}
+                </div>
               </div>
             </div>
           </CardContent>

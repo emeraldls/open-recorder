@@ -34,6 +34,10 @@ export function SaveFile(arg1) {
   return window['go']['main']['App']['SaveFile'](arg1);
 }
 
+export function SaveFileWithFPS(arg1, arg2) {
+  return window['go']['main']['App']['SaveFileWithFPS'](arg1, arg2);
+}
+
 export function SetResolution(arg1) {
   return window['go']['main']['App']['SetResolution'](arg1);
 }

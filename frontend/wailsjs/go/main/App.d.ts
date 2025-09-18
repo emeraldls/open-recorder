@@ -18,6 +18,8 @@ export function IsRecording():Promise<boolean>;
 
 export function SaveFile(arg1:Array<number>):Promise<void>;
 
+export function SaveFileWithFPS(arg1:Array<number>,arg2:number):Promise<void>;
+
 export function SetResolution(arg1:string):Promise<void>;
 
 export function SetSelectedDevice(arg1:number):Promise<void>;

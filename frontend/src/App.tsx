@@ -1,12 +1,10 @@
-import Home from "@/views/home";
 import { Routes, Route } from "react-router-dom";
-import { Recorder } from "./components/recorder";
+import { Recorder } from "./views/recorder";
 
 function App() {
   return (
     <Routes>
-      <Route path="/" element={<Home />} />
-      <Route path="/video-player" element={<Recorder />} />
+      <Route path="/" element={<Recorder />} />
     </Routes>
   );
 }

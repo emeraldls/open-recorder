@@ -370,7 +370,7 @@ func (a *App) recordScreen() {
 
 	}()
 
-	frameRate := 60
+	frameRate := 30
 
 	resDim, err := a.GetResolutionDimensions()
 	if err != nil {
@@ -450,9 +450,13 @@ func (a *App) recordScreen() {
 }
 
 func (a *App) SaveFile(data []byte) error {
+	return a.SaveFileWithFPS(data, 30)
+}
+
+func (a *App) SaveFileWithFPS(data []byte, outputFPS int) error {
 
 	randId := uuid.New().String()
-	fileName := fmt.Sprintf("recording-%s.mp4", randId)
+	fileName := fmt.Sprintf("recording-%dfps-%s.mp4", outputFPS, randId)
 	result, err := runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
 		Title:           "Save MP4 Video",
 		Filters:         []runtime.FileFilter{{DisplayName: "MP4 Video", Pattern: "*.mp4"}},
@@ -463,27 +467,88 @@ func (a *App) SaveFile(data []byte) error {
 	}
 
 	a.zoomPointsMux.Lock()
-	hasZoomPoints := len(a.zoomPoints) > 0
+	// hasZoomPoints := len(a.zoomPoints) > 0
 	zoomPoints := make([]ZoomPoint, len(a.zoomPoints))
 	copy(zoomPoints, a.zoomPoints)
 	a.zoomPointsMux.Unlock()
 
-	path := "recording-zoom.mp4"
+	// if hasZoomPoints {
+	// 	fmt.Printf("Applying zoom effects to %d points at %dfps\n", len(zoomPoints), outputFPS)
+	// 	return a.saveFileWithZoomAndFPS(data, result, zoomPoints, outputFPS)
+	// }
 
-	if hasZoomPoints {
-		fmt.Printf("Applying zoom effects to %d points\n", len(zoomPoints))
-		return a.saveFileWithZoom(data, path, zoomPoints)
+	if outputFPS != 30 {
+		return a.convertVideoFPS(data, result, outputFPS)
 	}
 
-	return os.WriteFile(path, data, 0644)
+	return os.WriteFile(result, data, 0644)
 }
 
-func (a *App) buildZoomFilter(zoomPoints []ZoomPoint) string {
+func (a *App) convertVideoFPS(data []byte, outputPath string, outputFPS int) error {
+	tempInput := fmt.Sprintf("./tmp/temp_recording_%s.mp4", uuid.New().String())
+	if err := os.WriteFile(tempInput, data, 0644); err != nil {
+		return fmt.Errorf("failed to write temp file: %v", err)
+	}
+	defer os.Remove(tempInput)
+
+	cmd := exec.Command("ffmpeg",
+		"-i", tempInput,
+		"-r", fmt.Sprintf("%d", outputFPS),
+		"-c:v", "libx264",
+		"-preset", "medium",
+		"-crf", "23",
+		"-y",
+		outputPath,
+	)
+
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to convert frame rate: %v", err)
+	}
+
+	fmt.Printf("Video saved with %dfps at: %s\n", outputFPS, outputPath)
+	return nil
+}
+
+func (a *App) saveFileWithZoomAndFPS(data []byte, outputPath string, zoomPoints []ZoomPoint, outputFPS int) error {
+	tempInput := fmt.Sprintf("./tmp/temp_recording_%s.mp4", uuid.New().String())
+	if err := os.WriteFile(tempInput, data, 0644); err != nil {
+		return fmt.Errorf("failed to write temp file: %v", err)
+	}
+	defer os.Remove(tempInput)
+
+	filterComplex := a.buildZoomFilterWithFPS(zoomPoints, outputFPS)
+
+	fmt.Printf("Using filter: %s\n", filterComplex)
+
+	cmd := exec.Command("ffmpeg",
+		"-i", tempInput,
+		"-vf", filterComplex,
+		"-r", fmt.Sprintf("%d", outputFPS),
+		"-c:a", "copy",
+		"-y",
+		outputPath,
+	)
+
+	cmd.Stderr = os.Stderr
+	cmd.Stdout = os.Stdout
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to apply zoom effects: %v", err)
+	}
+
+	fmt.Printf("Video saved with zoom effects at %dfps: %s\n", outputFPS, outputPath)
+	return nil
+}
+
+func (a *App) buildZoomFilterWithFPS(zoomPoints []ZoomPoint, outputFPS int) string {
 	if len(zoomPoints) == 0 {
 		return "null"
 	}
 
-	fps := 60.0
+	fps := float64(outputFPS)
 	zoomDuration := 2.0
 	zoomFactor := 2.0
 
@@ -522,7 +587,7 @@ func (a *App) saveFileWithZoom(data []byte, outputPath string, zoomPoints []Zoom
 	}
 	defer os.Remove(tempInput)
 
-	filterComplex := a.buildZoomFilter(zoomPoints)
+	filterComplex := a.buildZoomFilterWithFPS(zoomPoints, 30) // Use 30fps as default
 
 	fmt.Printf("Using filter: %s\n", filterComplex)
 
