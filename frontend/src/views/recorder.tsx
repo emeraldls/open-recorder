@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
-import { VideoPlayer } from "@/components/VideoPlayer";
+import { VideoPlayer } from "@/components/video-player";
 import { EventsOn, EventsOff } from "../../wailsjs/runtime/runtime";
 import {
   StopRecording,
